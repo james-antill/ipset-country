@@ -1,11 +1,12 @@
 # ipset-country
 
-## Block or allow countries using iptables, ipset and ipdeny.com
+## Block or allow countries using nftables (or iptables/ipset) and ipdeny.com
 
 ---
 
-_This used to be a [Gist](https://gist.github.com/mkorthof/3033ff64c4a5b4bd31336d422104d543) but was moved here instead_  
-_Please do not add Gist comments, but create an issue [here](https://github.com/mkorthof/ipset-country/issues)_
+_This is a fork from [mkorthof](https://github.com/mkorthof/ipset-country), but they are happy with just firewalld. So it'll never be merged. Don't bother them._
+
+_You can create an issue [here](https://github.com/james-antill/ipset-country/issues)_
 
 ---
 

@@ -29,6 +29,7 @@ DISTRO="auto"
 # Example: "CN,China; US,United States; RU,Russia"
 
 COUNTRY="CN,China; RU,Russia"
+COUNTRY="CU,Cuba; IR,Iran; KP,North Korea; SY,Syria;"
 
 # ---[ FIREWALLS AND OPTIONS  ]-------------------------------------------------
 # Iptables and ipset are used by default to create the chains, rules and ipsets
@@ -38,10 +39,14 @@ COUNTRY="CN,China; RU,Russia"
 # Blacklist: block specified Countries, set MODE to "reject" or "drop"
 # Whitelist: allow specified Countries and block all others, set "accept"
 
-# Iptables
+# Iptables/nftables
 MODE="reject" # Set target to use when ip matches country [accept|drop|reject]
 RESTORE=0     # Run iptables-restore first, before adding rules [0/1]
 LOGIPS=1      # Create logips chain to log matches [0/1]
+NFT=1         # Use nftables instead of iptables/ipset.
+NFT_T="ipcountry" # Table name for nft set objects.
+NFT_P="ipc-"  # Prefix for nft set objects.
+NFT_FALLBACK=true # Fallback to iptables if nft cmd doesn't exist
 
 # FirewallD
 FIREWALLD=0       # Use firewalld instead [0/1]
@@ -309,6 +314,15 @@ func_ipt_res() {
   fi
 }
 
+# No dump/restore for NFT:
+# Note "nft list ruleset" can be piped to nft -f. So we could add it, but nft
+# is namespaced so we don't need/want it.
+func_nft_res() {
+  # nft -f < "$rulesfile" && ipt_r="OK" || ipt_r="NOK"
+  ipt_r="SKIP"
+  func_msg "nft: restore - $ipt_r"
+}
+
 # check if logips chain and rules already exist, else create them - once
 func_ipt_log() {
   ipt_q=0
@@ -358,6 +372,35 @@ func_ipt_log() {
     [ "$proto" = "ipv4" ] && logips_run=1
     [ "$proto" = "ipv6" ] && logip6_run=1
   fi
+}
+
+# Check if the nft table exists, if not create it - once per. run
+# sets and the accept/drop/reject rules are created in nft_create_group()
+func_nft_create_once() {
+  if $nftcmd list table inet "${NFT_T}" >/dev/null 2>&1; then
+    # We do this so we get the policy correct.
+    # If the policy is the same we could flush instead.
+    $nftcmd delete chain inet "${NFT_T}" INPUT || true
+    ips_c="OK"
+  else
+    if $nftcmd add table inet "${NFT_T}"; then
+      ips_c="OK"
+    fi
+  fi
+
+  if [ "x$ips_c" = "xOK" ]; then
+    # Note that as soon as we add the default drop policy here everything stops.
+    if ! echo "$MODE" | grep -Eq "drop|reject" ; then
+      DEF_POLICY="drop"
+    else
+      DEF_POLICY="accept"
+    fi
+    # We add this before "normal" filter, means contrack won't save us though.
+    $nftcmd add chain inet "${NFT_T}" INPUT "{ type filter hook input priority -1; policy ${DEF_POLICY}; }" || ips_c="NOK"
+  else
+    ips_c="NOK"
+  fi
+  func_msg "nft: create table \"${NFT_T}\" - $ips_c"
 }
 
 # add ipset deny rule at last line in input chain or line number 1
@@ -422,6 +465,17 @@ func_ips_create() {
   func_msg "ipset: create set \"${proto}-$ctyname\" - $ips_c"
 }
 
+# create set for proto-ctyname, and add rules
+func_nft_create_group() {
+  { $nftcmd list set inet $NFT_T} "${NFT_P}${proto}-${ctyname}" >/dev/null 2>&1 || $nftcmd add set inet ${NFT_T} "${NFT_P}${proto}-${ctyname} { type ${proto}_addr ; flags interval; auto-merge; }" ; } && \
+    ips_c="OK" || ips_c="NOK"
+  func_msg "nft: create set \"${NFT_P}${proto}-$ctyname\" - $ips_c"
+  if [ "$ips_c" = "OK" ]; then
+    $nftcmd add rule inet ipcountry INPUT $ipt saddr @"${NFT_P}${proto}-${ctyname}" counter $MODE || ips_c="NOK"
+  fi
+  func_msg "nft: create rule \"${NFT_P}${proto}-$ctyname\" $MODE - $ips_c"
+}
+
 # add blocks to ipset
 func_ips_add() {
   [ "$FLUSH" -eq 1 ] && ipset flush "${proto}-${ctyname}"
@@ -430,6 +484,17 @@ func_ips_add() {
   done < "${confdir}/${proto}-${zonefile}" >/dev/null 2>&1 && ips_a="OK" || ips_a="NOK"
   [ "$i" -eq 0 ] && ips_a="NOK"
   func_msg "ipset: add \"${proto}-${zonefile}\" to \"${proto}-${ctyname}\" - $ips_a - $i entries"
+}
+
+# add ip blocks to nft ipcountry set
+# In theory we could add IPs to a new set and then rename, to make it atomic
+func_nft_add() {
+  [ "$FLUSH" -eq 1 ] && $nftcmd flush set inet "${NFT_T}" "${NFT_P}${proto}-${ctyname}"
+  i=0; while read -r cidr; do
+    $nftcmd add element inet "${NFT_T}" "${NFT_P}${proto}-${ctyname}" "{ $cidr }" && i=$((i+1)) || echo "NOK: \"${NFT_P}${proto}-${ctyname}\" - $i - $cidr"
+  done < "${confdir}/${proto}-${zonefile}" >/dev/null 2>&1 && ips_a="OK" || ips_a="NOK"
+  [ "$i" -eq 0 ] && ips_a="NOK"
+  func_msg "nft: add \"${NFT_P}${proto}-${zonefile}\" to \"${proto}-${ctyname}\" - $ips_a - $i entries"
 }
 
 func_firewalld_ips() {
@@ -554,6 +619,30 @@ fi
 [ "$DISTRO" = "auto" ] && func_dist_auto
 func_vars
 
+if [ "$NFT" -eq 1 ] && $NFT_FALLBACK; then
+  # This allows a fallback to iptables...
+  nftcmd="$( which nft 2>/dev/null )"
+  if [ ! -x "$nftcmd" ]; then
+    NFT=0
+  fi
+fi
+
+if [ "$NFT" -eq 1 ]; then
+  # Don't allow MODE=accept ... it "works" except as soon as we setup
+  # default=drop before we have the set data, so we can't connect to anything
+  # incl. to ipdeny.com ... which is a bit of a problem.
+  if ! echo "$MODE" | grep -Eq "drop|reject" ; then
+  # if ! echo "$MODE" | grep -Eq "accept|drop|reject" ; then
+    echo "invalid MODE setting"
+    exit 1
+  fi
+  nftcmd="$( which nft 2>/dev/null )"
+  test -x "$nftcmd" && nft_c="OK" || nft_c="NOK - NOT FOUND"
+  if [ "$nft_c" != "OK" ]; then
+    func_msg m:stdout "try installing nftables, exiting..."
+    exit 1
+  fi
+else
 if [ "$FIREWALLD" -eq 1 ]; then
   # shellcheck disable=SC2230
   firewallcmd="$( which firewall-cmd 2>/dev/null )"
@@ -582,6 +671,7 @@ else
     exit 1
   fi
 fi
+fi
 
 # shellcheck disable=SC2230
 ipset="$( which ipset 2>/dev/null )"
@@ -603,6 +693,10 @@ which md5sum >/dev/null 2>&1 || \
 
 # main loop: handle country here
 func_block_ip() {
+  if [ "$NFT" -eq 1 ]; then
+    func_nft_create_once
+  fi
+
   SAVE_IFS="$IFS"
   IFS=";"
   for cty in $COUNTRY; do
@@ -619,7 +713,16 @@ func_block_ip() {
         func_vars
         func_zf
         if [ "$MD5CHECK" -eq 0 ] || [ "$md5src" = "$md5chk" ]; then
+          if [ "$NFT" -eq 1 ]; then
+            # This needs to happen even if zf=SKIP, because we readd the rules
+            # each time.
+            func_nft_create_group
+          fi
+
           if [ "$zf" != "SKIP" ]; then
+            if [ "$NFT" -eq 1 ]; then
+              func_nft_add
+            else
             if [ "$FIREWALLD" -eq 1 ]; then
               func_firewalld_ips
               if [ "$FIREWALLD_MODE" -eq 1 ]; then
@@ -645,6 +748,7 @@ func_block_ip() {
                 # blacklist
                 func_ipt_deny
               fi
+            fi
             fi
           fi
         else
