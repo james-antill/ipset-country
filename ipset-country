@@ -467,13 +467,21 @@ func_ips_create() {
 
 # create set for proto-ctyname, and add rules
 func_nft_create_group() {
-  { $nftcmd list set inet $NFT_T} "${NFT_P}${proto}-${ctyname}" >/dev/null 2>&1 || $nftcmd add set inet ${NFT_T} "${NFT_P}${proto}-${ctyname} { type ${proto}_addr ; flags interval; auto-merge; }" ; } && \
+  if $nftcmd list set inet "${NFT_T}" "${NFT_P}${proto}-${ctyname}" >/dev/null 2>&1; then
+    ips_c="OK"
+  else
+    $nftcmd add set inet ${NFT_T} "${NFT_P}${proto}-${ctyname} { type ${proto}_addr ; flags interval; auto-merge; }" && \
     ips_c="OK" || ips_c="NOK"
-  func_msg "nft: create set \"${NFT_P}${proto}-$ctyname\" - $ips_c"
+    func_msg "nft: create set \"${NFT_P}${proto}-$ctyname\" - $ips_c"
+    if [ "$zf" == "SKIP" ]; then
+      zf="FORCE"
+    fi
+  fi
+
   if [ "$ips_c" = "OK" ]; then
     $nftcmd add rule inet ipcountry INPUT $ipt saddr @"${NFT_P}${proto}-${ctyname}" counter $MODE || ips_c="NOK"
+    func_msg "nft: create rule \"${NFT_P}${proto}-$ctyname\" $MODE - $ips_c"
   fi
-  func_msg "nft: create rule \"${NFT_P}${proto}-$ctyname\" $MODE - $ips_c"
 }
 
 # add blocks to ipset
