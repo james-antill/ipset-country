@@ -71,7 +71,7 @@ UFW=0 # Set to 1 to use iptables besides ufw, at your own risk [0/1]
 IPBLOCK_URL_V4="http://www.ipdeny.com/ipblocks/data/aggregated"
 IPBLOCK_URL_V6="http://www.ipdeny.com/ipv6/ipaddresses/blocks"
 IPV4=1      # Use ipv4, ipv6 or both
-IPV6=0      # For ipv6 also set IPBLOCK_URL_V6 [0/1]
+IPV6=1      # For ipv6 also set IPBLOCK_URL_V6 [0/1]
 MD5CHECK=1  # Check zonefile md5sums [0/1]
 FORCE=0     # Run even if zonefile is unchanged [0/1]
             # same as running './ipset-country force'
@@ -376,7 +376,14 @@ func_ipt_log() {
 
 # Check if the nft table exists, if not create it - once per. run
 # sets and the accept/drop/reject rules are created in nft_create_group()
+_NFT_ONCE_DONE=0
 func_nft_create_once() {
+  if [ "$_NFT_ONCE_DONE" -eq 1 ]; then
+    # For ipv4+ipv6 we only want to do this once.
+    return
+  fi
+  _NFT_ONCE_DONE=1
+
   if $nftcmd list table inet "${NFT_T}" >/dev/null 2>&1; then
     # We do this so we get the policy correct.
     # If the policy is the same we could flush instead.
@@ -479,7 +486,7 @@ func_nft_create_group() {
   fi
 
   if [ "$ips_c" = "OK" ]; then
-    $nftcmd add rule inet ipcountry INPUT $ipt saddr @"${NFT_P}${proto}-${ctyname}" counter $MODE || ips_c="NOK"
+    $nftcmd add rule inet ${NFT_T} INPUT $ipt saddr @"${NFT_P}${proto}-${ctyname}" counter $MODE || ips_c="NOK"
     func_msg "nft: create rule \"${NFT_P}${proto}-$ctyname\" $MODE - $ips_c"
   fi
 }
