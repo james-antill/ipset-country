@@ -491,7 +491,7 @@ func_nft_create_group() {
   fi
 
   if [ "$ips_c" = "OK" ]; then
-    $nftcmd add rule inet ${NFT_T} INPUT $ipt saddr @"${NFT_P}${proto}-${ctyname}" counter $MODE $_NFT_LOG || ips_c="NOK"
+    $nftcmd add rule inet ${NFT_T} INPUT $ipt saddr @"${NFT_P}${proto}-${ctyname}" counter $_NFT_LOG $MODE || ips_c="NOK"
     func_msg "nft: create rule \"${NFT_P}${proto}-$ctyname\" $MODE - $ips_c"
   fi
 }
